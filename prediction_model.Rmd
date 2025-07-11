@@ -1,0 +1,995 @@
+---
+title: "MVPA_prediction_model"
+author: "Goretti Espana-Irla"
+date: "2025-03-03"
+  html_notebook: 
+    fig_caption: true
+    toc: true
+editor_options: 
+  chunk_output_type: console
+---
+
+# Get the needed libraries
+
+```{r}
+library(dplyr)
+library(tidymodels)
+library(vip)
+library(scales)
+library(glmnet)
+library(readr)
+library(ggplot2)
+library(Rtsne)
+library(randomForest)
+library(NeuralNetTools)
+library(readxl)
+
+```
+
+# Load the data and create subset with only features we want
+
+```{r}
+# Load the data
+tracts <- read_csv("tracts.csv")
+tracts <- data.frame(tracts)
+
+# Select relevant columns
+pattern <- "^fd_t2_.*|^fc_t2_.*|^fdc_t2_.*"
+selected_columns <- grep(pattern, names(tracts), value = TRUE)
+subset_data <- select(tracts, all_of(selected_columns))
+
+# Labels
+labels <- select(tracts, fa_epi_mem, fa_proc_speed, fa_work_mem, fa_att_control, fa_vis_spatial)
+
+# Remove columns with all NA values
+subset_data <- subset_data %>% select(where(~ !all(is.na(.))))
+
+# Check for NA values in predictors
+total_na <- sum(is.na(subset_data))
+print(paste("Total NA values in predictors:", total_na))
+
+na_per_column <- colSums(is.na(subset_data))
+print("NA values per column in predictors:")
+print(na_per_column)
+
+# Check for NA values in the target variable
+total_na_target <- sum(is.na(labels$fa_epi_mem))
+print(paste("Total NA values in target variable (fa_epi_mem):", total_na_target))
+
+# Filter out rows where the target variable is NA
+filtered_data <- subset_data[!is.na(labels$fa_epi_mem), ]
+filtered_labels <- labels[!is.na(labels$fa_epi_mem), ]
+
+# Check that the number of rows match
+print(paste("Number of rows in predictors after filtering:", nrow(filtered_data)))
+print(paste("Number of rows in target after filtering:", nrow(filtered_labels)))
+
+
+```
+
+```{r}
+head(subset_data)
+```
+
+```{r}
+head(labels)
+```
+
+```{r}
+# Fill in NA with median values
+medians <- filtered_data %>%
+  summarise(across(where(is.numeric), ~median(., na.rm = TRUE), .names = "median_{.col}"))
+filtered_data <- filtered_data %>%
+  mutate(across(where(is.numeric), ~ifelse(is.na(.), medians[[paste0("median_", cur_column())]], .)))
+
+# Remove columns with zero variance
+filtered_data <- filtered_data %>% select(where(~ var(.) > 0))
+
+# Check for any remaining NA values
+total_na_after <- sum(is.na(filtered_data))
+print(paste("Total NA values in predictors after filling and removal:", total_na_after))
+
+
+```
+
+```{r}
+# Scaling the data
+scaled_data <- as.data.frame(lapply(filtered_data, rescale))
+
+# Combine the scaled data with the target label (fa_epi_mem)
+final_data <- cbind(scaled_data, fa_epi_mem = filtered_labels$fa_epi_mem)
+
+# Check that final data has no NA values
+sum(is.na(final_data))
+
+```
+
+```{r}
+head(final_data)
+```
+
+```{r}
+# Split the data into training and testing sets
+set.seed(123)
+data_split <- initial_split(final_data, prop = 0.8)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+```
+
+# Plotting the data and labels
+
+```{r}
+
+# Apply t-SNE
+set.seed(42) # For reproducibility
+tsne_result <- Rtsne(as.matrix(scaled_data), dims = 2, perplexity = 30, verbose = TRUE)
+
+# Create a data frame with the t-SNE results
+tsne_data <- data.frame(tsne_result$Y)
+colnames(tsne_data) <- c("Dim1", "Dim2")
+
+# Adding labels for coloring
+tsne_data <- cbind(tsne_data, filtered_labels)
+
+# Plotting function for t-SNE results with gradient colors
+plot_tsne <- function(data, label_col, label_name) {
+  ggplot(data, aes(x = Dim1, y = Dim2, color = !!sym(label_col))) + 
+    geom_point() + 
+    theme_minimal() + 
+    scale_color_gradient(low = "red", high = "blue") +
+    labs(title = paste("t-SNE of High-Dimensional Data:", label_name),
+         x = "t-SNE Dimension 1",
+         y = "t-SNE Dimension 2",
+         color = label_name)
+}
+
+
+# Create plots for each label
+plot1 <- plot_tsne(tsne_data, "fa_epi_mem", "Episodic Memory")
+plot2 <- plot_tsne(tsne_data, "fa_proc_speed", "Processing Speed")
+plot3 <- plot_tsne(tsne_data, "fa_work_mem", "Working Memory")
+plot4 <- plot_tsne(tsne_data, "fa_att_control", "Attention Control")
+plot5 <- plot_tsne(tsne_data, "fa_vis_spatial", "Visual Spatial")
+
+```
+
+```{r}
+# Perform PCA
+pca_result <- prcomp(scaled_data, center = TRUE, scale. = TRUE)
+pca_data <- data.frame(pca_result$x[, 1:2])
+colnames(pca_data) <- c("PC1", "PC2")
+pca_data <- cbind(pca_data, filtered_labels)
+
+# Plot PCA result
+plot_pca <- function(data, label_col, label_name) {
+  ggplot(data, aes(x = PC1, y = PC2, color = !!sym(label_col))) + 
+    geom_point() + 
+    theme_minimal() + 
+    scale_color_gradient(low = "red", high = "blue") +
+    labs(title = paste("PCA of High-Dimensional Data:", label_name),
+         x = "Principal Component 1",
+         y = "Principal Component 2",
+         color = label_name)
+}
+
+# Create plots for each label
+pca_plot1 <- plot_pca(pca_data, "fa_epi_mem", "Episodic Memory")
+pca_plot2 <- plot_pca(pca_data, "fa_proc_speed", "Processing Speed")
+pca_plot3 <- plot_pca(pca_data, "fa_work_mem", "Working Memory")
+pca_plot4 <- plot_pca(pca_data, "fa_att_control", "Attention Control")
+pca_plot5 <- plot_pca(pca_data, "fa_vis_spatial", "Visual Spatial")
+```
+
+```{r}
+
+# Calculate the correlation matrix
+cor_matrix <- cor(scaled_data, use = "complete.obs")
+
+# Plot the heatmap of the correlation matrix
+library(ggplot2)
+library(reshape2)
+
+# Melt the correlation matrix into long format
+cor_melt <- melt(cor_matrix)
+
+# Plot heatmap
+ggplot(cor_melt, aes(Var1, Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0, limit = c(-1, 1), space = "Lab", name="Correlation") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, size = 12, hjust = 1)) +
+  coord_fixed() +
+  labs(title = "Correlation Matrix Heatmap",
+       x = "Features",
+       y = "Features")
+
+```
+
+# Lasso Attempt
+
+```{r}
+# Define a recipe for preprocessing
+ls_recipe <- recipe(fa_epi_mem ~ ., data = train_data) %>%
+  step_normalize(all_predictors()) %>%
+  step_naomit(all_predictors())
+
+
+```
+
+```{r}
+# Define the lasso regression model specification
+ls_spec <- linear_reg(penalty = tune(), mixture = 1) %>% 
+  set_engine("glmnet", num.threads = parallel::detectCores())
+
+```
+
+```{r}
+# Create a workflow
+ls_workflow <- workflow() %>%
+  add_recipe(ls_recipe) %>%
+  add_model(ls_spec)
+
+ls_workflow
+```
+
+```{r}
+# Define the resampling method
+set.seed(123)
+ls_cv_folds <- vfold_cv(train_data, v = 5)
+
+# Define the grid for tuning
+ls_penalty_grid <- grid_regular(penalty(), levels = 50)
+
+# Tune the model
+doParallel::registerDoParallel(parallel::detectCores())
+ls_tune_results <- tune_grid(
+  ls_workflow,
+  resamples = ls_cv_folds,
+  grid = ls_penalty_grid,
+  control = control_grid(save_pred = TRUE)
+)
+
+# Select the best model
+ls_best_penalty <- select_best(ls_tune_results, "rmse")
+```
+
+```{r}
+# Finalize the workflow with the best penalty parameter
+final_ls_workflow <- ls_workflow %>%
+  finalize_workflow(ls_best_penalty)
+
+# Fit the final model on the training data
+final_ls_fit <- final_ls_workflow %>%
+  fit(data = train_data)
+
+```
+
+```{r}
+# Evaluate the model on the testing data
+test_ls_results <- final_ls_fit %>%
+  predict(test_data) %>%
+  bind_cols(test_data) %>%
+  metrics(truth = fa_epi_mem, estimate = .pred)
+
+# Print the results
+print(test_ls_results)
+
+# Plot variable importance
+vip(final_ls_fit$fit$fit$fit)
+
+```
+
+# Random Forest Regression Attempt
+
+```{r}
+# Define the recipe with interaction terms
+rf_recipe <- recipe(fa_epi_mem ~ ., data = train_data) %>%
+  step_normalize(all_predictors()) %>%
+  step_naomit(all_predictors())
+
+```
+
+```{r}
+# Define the random forest model specification
+rf_spec <- rand_forest(mtry = tune(), trees = 100, min_n = tune()) %>% 
+  set_engine("ranger", importance = "permutation", num.threads = parallel::detectCores()) %>% 
+  set_mode("regression")
+```
+
+```{r}
+# Create a workflow
+rf_workflow <- workflow() %>%
+  add_recipe(rf_recipe) %>%
+  add_model(rf_spec)
+```
+
+```{r}
+# Define the resampling method
+set.seed(123)
+rf_cv_folds <- vfold_cv(train_data, v = 5)
+
+# Define the grid for tuning with a smaller range
+rf_grid <- grid_regular(
+  mtry(range = c(2, floor(sqrt(ncol(train_data))))),
+  min_n(range = c(2, 10)),
+  levels = 100
+)
+
+# Use parallel processing
+doParallel::registerDoParallel(parallel::detectCores())
+
+# Tune the model
+rf_tune_results <- tune_grid(
+  rf_workflow,
+  resamples = rf_cv_folds,
+  grid = rf_grid,
+  control = control_grid(save_pred = TRUE)
+)
+
+# Select the best model
+rf_best_params <- select_best(rf_tune_results, "rmse")
+```
+
+```{r}
+# Finalize the workflow with the best parameters
+final_rf_workflow <- rf_workflow %>%
+  finalize_workflow(rf_best_params)
+
+# Fit the final model on the training data
+final_rf_fit <- final_rf_workflow %>%
+  fit(data = train_data)
+```
+
+```{r}
+# Evaluate the model on the testing data
+test_rf_results <- final_rf_fit %>%
+  predict(test_data) %>%
+  bind_cols(test_data) %>%
+  metrics(truth = fa_epi_mem, estimate = .pred)
+
+# Print the results
+print(test_rf_results)
+
+# Plot variable importance
+vip(final_rf_fit$fit$fit$fit)
+```
+
+# SVR Attempt
+
+```{r}
+# Define the recipe for preprocessing
+svr_recipe <- recipe(fa_epi_mem ~ ., data = train_data) %>%
+  step_normalize(all_predictors()) %>%
+  step_naomit(all_predictors())
+```
+
+```{r}
+# Define the SVR model specification
+svr_spec <- svm_rbf(cost = tune(), rbf_sigma = tune()) %>%
+  set_engine("kernlab", num.threads = parallel::detectCores()) %>%
+  set_mode("regression")
+```
+
+```{r}
+# Create a workflow
+svr_workflow <- workflow() %>%
+  add_recipe(svr_recipe) %>%
+  add_model(svr_spec)
+```
+
+```{r}
+# Define the resampling method
+set.seed(123)
+svr_cv_folds <- vfold_cv(train_data, v = 5)
+
+# Define the grid for tuning
+svr_grid <- grid_regular(
+  cost(range = c(0.001, 10)),
+  rbf_sigma(range = c(0.001, 1)),
+  levels = 15
+)
+
+# Tune the model
+doParallel::registerDoParallel(parallel::detectCores())
+tune_results <- tune_grid(
+  svr_workflow,
+  resamples = svr_cv_folds,
+  grid = svr_grid,
+  control = control_grid(save_pred = TRUE)
+)
+
+svr_best_params <- select_best(tune_results, "rmse")
+```
+
+```{r}
+# Finalize the workflow with the best parameters
+final_svr_workflow <- svr_workflow %>%
+  finalize_workflow(svr_best_params)
+
+# Fit the final model on the training data
+final_svr_fit <- final_svr_workflow %>%
+  fit(data = train_data)
+```
+
+```{r}
+# Evaluate the model on the testing data
+svr_test_results <- final_svr_fit %>%
+  predict(test_data) %>%
+  bind_cols(test_data) %>%
+  metrics(truth = fa_epi_mem, estimate = .pred)
+
+# Print the results
+print(svr_test_results)
+```
+
+
+
+
+```{r}
+library(randomForest)
+
+library(readxl)
+siemens_zscores_prediction <- read_excel("/work/cnelab/fitbir/raw_csv/prediction_model/clean_datasets/siemens_zscores_prediction_noNAs.xlsx")
+ge_zscores_prediction <- read_excel("/work/cnelab/fitbir/raw_csv/prediction_model/clean_datasets/ge_zscores_prediction.xlsx")
+phillips_zscores_prediction <- read_excel("/work/cnelab/fitbir/raw_csv/prediction_model/clean_datasets/phillips_zscores_prediction.xlsx")
+
+View(siemens_zscores_prediction)
+View(ge_zscores_prediction)
+View(phillips_zscores_prediction)
+
+
+
+# Load required package
+library(randomForest)
+
+# Step 1: Define target clusters
+target_clusters <- c("cluster1_1", "cluster1_2", "cluster1_3", "cluster1_4", 
+                     "cluster2_1", "cluster3_1", "cluster3_3", "cluster3_4", "cluster3_5")
+
+# Step 2: Ensure column names match across all scanner datasets
+common_columns <- intersect(names(siemens_zscores_prediction), 
+                            intersect(names(ge_zscores_prediction), names(phillips_zscores_prediction)))
+
+siemens_zscores_prediction <- siemens_zscores_prediction[, common_columns]
+ge_zscores_prediction <- ge_zscores_prediction[, common_columns]
+phillips_zscores_prediction <- phillips_zscores_prediction[, common_columns]
+
+# Step 3: Keep only TBI cases (exclude controls)
+siemens_cases <- siemens_zscores_prediction[siemens_zscores_prediction$case_control == "1", ]
+ge_cases <- ge_zscores_prediction[ge_zscores_prediction$case_control == "1", ]
+phillips_cases <- phillips_zscores_prediction[phillips_zscores_prediction$case_control == "1", ]
+
+# Step 4: Convert target variables to numeric
+for (target in target_clusters) {
+  siemens_cases[[target]] <- as.numeric(siemens_cases[[target]])
+}
+
+# Step 5: Define predictor variables (exclude case_control and target clusters)
+predictors <- setdiff(common_columns, c("case_control", target_clusters))
+
+# Step 6: Train separate Random Forest models for each target cluster
+rf_models <- list()
+for (target in target_clusters) {
+  rf_models[[target]] <- randomForest(x = siemens_cases[, predictors], 
+                                      y = siemens_cases[[target]], 
+                                      ntree = 500)
+}
+
+# Step 7: Predict each cluster for GE and Phillips cases
+test_data <- rbind(ge_cases, phillips_cases)
+for (target in target_clusters) {
+  test_data[[paste0("predicted_", target)]] <- predict(rf_models[[target]], newdata = test_data[, predictors])
+}
+
+# Step 8: View first few predictions
+head(test_data[, c("case_control", paste0("predicted_", target_clusters))])
+
+# Step 9: Save predictions to a CSV file
+write.csv(test_data[, c("case_control", paste0("predicted_", target_clusters))], 
+          "random_forest_predictions.csv", row.names = FALSE)
+
+
+# Merge predictions with actual data for GE and Phillips
+ge_phillips_actual <- rbind(ge_cases, phillips_cases)
+
+# Compute correlation between predicted and actual values
+cor_results <- cor(ge_phillips_actual[target_clusters], test_data[paste0("predicted_", target_clusters)], use = "pairwise.complete.obs")
+
+print(cor_results)
+
+
+summary(test_data[paste0("predicted_", target_clusters)])
+
+
+library(ggplot2)
+
+# Convert to long format for plotting
+library(reshape2)
+
+test_data_long <- melt(test_data, id.vars = "case_control")
+
+# Plot distributions
+ggplot(test_data_long, aes(x = variable, y = value, fill = as.factor(case_control))) +
+  geom_boxplot() +
+  labs(title = "Predicted Seed-Cluster Z-scores in GE and Phillips Cases",
+       x = "Predicted Cluster",
+       y = "Predicted Z-score") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+
+
+```
+
+
+
+#Random Forest MVPA
+
+```{r}
+
+library(readxl)
+siemens_zscores_prediction <- read_excel("/work/cnelab/fitbir/raw_csv/prediction_model/clean_datasets/siemens_zscores_prediction_noNAs.xlsx")
+ge_zscores_prediction <- read_excel("/work/cnelab/fitbir/raw_csv/prediction_model/clean_datasets/ge_zscores_prediction.xlsx")
+phillips_zscores_prediction <- read_excel("/work/cnelab/fitbir/raw_csv/prediction_model/clean_datasets/phillips_zscores_prediction.xlsx")
+
+View(siemens_zscores_prediction)
+View(ge_zscores_prediction)
+View(phillips_zscores_prediction)
+
+
+library(tidymodels)
+library(ranger)
+library(vip)
+library(ranger)
+
+# Step 1: Combine Data and Prepare for Modeling
+# Add a scanner column to each dataset
+siemens_zscores_prediction$scanner <- "Siemens"
+ge_zscores_prediction$scanner <- "GE"
+phillips_zscores_prediction$scanner <- "Philips"
+
+# Bind all datasets together
+all_data <- bind_rows(siemens_zscores_prediction, ge_zscores_prediction, phillips_zscores_prediction)
+
+# Ensure case_control variable is present
+all_data <- all_data %>%
+  filter(case_control == "1")  # Only keep TBI cases
+
+# Step 2: Define Training & Testing Data
+train_data <- all_data %>% filter(scanner == "Siemens")  # Training on Siemens cases
+test_data <- all_data %>% filter(scanner %in% c("GE", "Philips"))  # Predicting on GE & Philips
+
+# Step 3: Define Random Forest Recipe
+rf_recipe <- recipe(case_control ~ ., data = train_data) %>%
+  update_role(scanner, new_role = "id") %>%
+  update_role(id, new_role = "id") %>%
+  step_zv(all_predictors()) %>%  # Remove predictors with zero variance
+  step_normalize(all_numeric_predictors()) %>%
+  step_naomit(all_predictors())
+
+
+# Step 4: Define Model Specification
+rf_spec <- rand_forest(mtry = tune(), trees = 100, min_n = tune()) %>% 
+  set_engine("ranger", importance = "permutation", num.threads = parallel::detectCores()) %>% 
+  set_mode("regression")
+
+# Step 5: Create Workflow
+rf_workflow <- workflow() %>%
+  add_recipe(rf_recipe) %>%
+  add_model(rf_spec)
+
+# Step 6: Cross-Validation & Hyperparameter Tuning
+set.seed(123)
+rf_cv_folds <- vfold_cv(train_data, v = 5)
+
+
+rf_grid <- grid_regular(
+  mtry(range = c(2, floor(sqrt(ncol(train_data) - 1)))),  # Adjusted for predictors
+  min_n(range = c(2, 10)),
+  levels = 10
+)
+
+doParallel::registerDoParallel(parallel::detectCores())
+
+rf_tune_results <- tune_grid(
+  rf_workflow,
+  resamples = rf_cv_folds,
+  grid = rf_grid,
+  control = control_grid(save_pred = TRUE)
+)
+
+rf_best_params <- select_best(rf_tune_results, metric = "rmse")
+
+
+# Step 7: Final Model Training
+final_rf_workflow <- rf_workflow %>%
+  finalize_workflow(rf_best_params)
+
+final_rf_fit <- final_rf_workflow %>%
+  fit(data = train_data)
+
+# Step 8: Predictions on GE and Philips
+predictions <- final_rf_fit %>%
+  predict(test_data) %>%
+  bind_cols(test_data)
+
+# Step 9: Variable Importance
+vip(final_rf_fit$fit$fit$fit)
+
+# Step 10: Save Predictions
+write.csv(predictions, "predicted_scanner_values.csv", row.names = FALSE)
+
+```
+
+#RF working predicting clusters
+```{r}
+# Libraries
+library(readxl)
+library(tidymodels)
+library(ranger)
+library(vip)
+library(doParallel)
+
+# Load data
+siemens_zscores_prediction <- read_excel("/work/cnelab/fitbir/raw_csv/prediction_model/clean_datasets/siemens_zscores_prediction_noNAs.xlsx")
+ge_zscores_prediction <- read_excel("/work/cnelab/fitbir/raw_csv/prediction_model/clean_datasets/ge_zscores_prediction.xlsx")
+phillips_zscores_prediction <- read_excel("/work/cnelab/fitbir/raw_csv/prediction_model/clean_datasets/phillips_zscores_prediction.xlsx")
+
+# Combine Data and Prepare for Modeling
+siemens_zscores_prediction$scanner <- "Siemens"
+ge_zscores_prediction$scanner <- "GE"
+phillips_zscores_prediction$scanner <- "Philips"
+
+# Bind all datasets together
+all_data <- bind_rows(siemens_zscores_prediction, ge_zscores_prediction, phillips_zscores_prediction)
+
+# Filter for TBI cases (assuming you want cases only)
+all_data <- all_data %>% filter(case_control == 1)  # Only keep TBI cases
+
+# Define Training & Testing Data
+train_data <- all_data %>% filter(scanner == "Siemens")  # Training on Siemens data
+test_data <- all_data %>% filter(scanner %in% c("GE", "Philips"))  # Predicting on GE & Philips
+
+# List of Cluster Variables
+clusters <- c("cluster1_1", "cluster1_2", "cluster1_3", "cluster1_4", "cluster2_1", 
+              "cluster3_1", "cluster3_3", "cluster3_4", "cluster3_5")
+
+# Define Random Forest Model Specification
+rf_spec <- rand_forest(mtry = tune(), trees = 100, min_n = tune()) %>% 
+  set_engine("ranger", importance = "permutation", num.threads = parallel::detectCores()) %>% 
+  set_mode("regression")
+
+# Define Hyperparameter Grid
+rf_grid <- grid_regular(
+  mtry(range = c(2, floor(sqrt(ncol(train_data) - 1)))),  # Adjusted for predictors
+  min_n(range = c(2, 10)),
+  levels = 10
+)
+
+# Set up Parallel Processing
+doParallel::registerDoParallel(parallel::detectCores())
+
+# Loop through each cluster variable and train a model
+results <- list()
+
+for (cluster in clusters) {
+  
+  # Define the Recipe for the current cluster
+  rf_recipe <- recipe(as.formula(paste(cluster, "~ .")), data = train_data) %>%
+    update_role(scanner, new_role = "id") %>%
+    update_role(id, new_role = "id") %>%
+    step_zv(all_predictors()) %>%  # Remove predictors with zero variance
+    step_normalize(all_numeric_predictors()) %>%
+    step_naomit(all_predictors())
+  
+  # Create the Workflow
+  rf_workflow <- workflow() %>%
+    add_recipe(rf_recipe) %>%
+    add_model(rf_spec)
+  
+  # Set up Cross-Validation
+  set.seed(123)
+  rf_cv_folds <- vfold_cv(train_data, v = 5)
+
+  # Hyperparameter Tuning
+  rf_tune_results <- tune_grid(
+    rf_workflow,
+    resamples = rf_cv_folds,
+    grid = rf_grid,
+    control = control_grid(save_pred = TRUE)
+  )
+  
+  # Select Best Parameters Based on RMSE
+  rf_best_params <- select_best(rf_tune_results, metric = "rmse")
+  
+  # Finalize the Workflow with Best Parameters
+  final_rf_workflow <- rf_workflow %>%
+    finalize_workflow(rf_best_params)
+  
+  # Train the Final Model
+  final_rf_fit <- final_rf_workflow %>%
+    fit(data = train_data)
+  
+  # Make Predictions on GE and Philips
+  predictions <- final_rf_fit %>%
+    predict(test_data) %>%
+    bind_cols(test_data)
+  
+  # Store the predictions for the current cluster
+  results[[cluster]] <- predictions
+}
+
+# View the results for all clusters
+results
+
+# Visualize Variable Importance for the Last Cluster Model (optional)
+# You can replace `final_rf_fit` with a specific model if needed
+vip(final_rf_fit$fit$fit$fit)
+
+
+```
+
+
+#rd predict tbis
+```{r}
+# Load necessary libraries
+library(tidymodels)
+library(ranger)
+library(vip)
+library(readxl)
+library(caret)
+
+# Load data
+siemens_zscores_prediction <- read_excel("/work/cnelab/fitbir/raw_csv/prediction_model/clean_datasets/siemens_zscores_prediction_noNAs.xlsx")
+ge_zscores_prediction <- read_excel("/work/cnelab/fitbir/raw_csv/prediction_model/clean_datasets/ge_zscores_prediction.xlsx")
+phillips_zscores_prediction <- read_excel("/work/cnelab/fitbir/raw_csv/prediction_model/clean_datasets/phillips_zscores_prediction.xlsx")
+
+# Add scanner column to each dataset
+siemens_zscores_prediction$scanner <- "Siemens"
+ge_zscores_prediction$scanner <- "GE"
+phillips_zscores_prediction$scanner <- "Philips"
+
+# Combine datasets
+all_data <- bind_rows(siemens_zscores_prediction, ge_zscores_prediction, phillips_zscores_prediction)
+
+# Convert target variable to factor
+all_data$case_control <- as.factor(all_data$case_control)
+
+# Check for missing data
+sum(is.na(all_data))
+
+# Filter for only the Siemens data for training
+train_data <- all_data %>% filter(scanner == "Siemens")
+test_data <- all_data %>% filter(scanner %in% c("GE", "Philips"))
+
+# Balance the dataset using oversampling and undersampling
+#train_data_balanced <- ovun.sample(case_control ~ ., data = train_data, method = "both", p = 0.5, seed = 123)$data
+
+# The test data should not be balanced, so we keep it as is
+# test_data remains unchanged
+
+# Check the distribution after balancing
+#table(train_data_balanced$case_control)
+
+# Define the recipe for model preprocessing
+rf_recipe <- recipe(case_control ~ ., data = train_data) %>%
+  update_role(scanner, new_role = "id") %>%
+  update_role(id, new_role = "id") %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_naomit(all_predictors())%>%
+  step_smote(case_control, over_ratio = 1) #(over_ratio = 0 means that no synthetic samples will be generated. In essence, this could indicate that the original class distribution will be maintained, with no additional samples created for the minority class)
+
+# Define the random forest model specification
+rf_spec <- rand_forest(mtry = tune(), trees = 100, min_n = tune()) %>%
+  set_engine("ranger", importance = "permutation", num.threads = parallel::detectCores()) %>%
+  set_mode("classification")
+
+# Create the workflow
+rf_workflow <- workflow() %>%
+  add_recipe(rf_recipe) %>%
+  add_model(rf_spec)
+
+# Set up cross-validation
+set.seed(123)
+rf_cv_folds <- vfold_cv(train_data, v = 5, strata = case_control)
+
+# Hyperparameter grid (simplified for troubleshooting)
+rf_grid <- grid_regular(
+  mtry(range = c(2, floor(sqrt(ncol(train_data) - 1)))),  # mtry adjusted based on predictors
+  min_n(range = c(2, 10)),
+  levels = 3  # Reduced levels for debugging
+)
+
+# Parallel processing setup
+doParallel::registerDoParallel(parallel::detectCores())
+
+# Run the grid search
+rf_tune_results <- tune_grid(
+  rf_workflow,
+  resamples = rf_cv_folds,
+  grid = rf_grid,
+  control = control_grid(save_pred = TRUE)
+)
+
+# Show the notes to check why models failed
+show_notes(rf_tune_results)
+
+# Try selecting the best parameters
+#rf_best_params <- select_best(rf_tune_results, metric = "roc_auc") # try using f1-score to choose instead of "metric = "accuracy")
+rf_best_params <- select_best(rf_tune_results, metric = "accuracy")
+
+# Finalize the workflow with the best parameters
+final_rf_workflow <- rf_workflow %>%
+  finalize_workflow(rf_best_params)
+
+# Train the final model
+final_rf_fit <- final_rf_workflow %>%
+  fit(data = train_data)
+
+
+#add code here to check how well this model is doing just within siemans. 
+
+library(yardstick)
+
+# Make predictions on the test set (GE + Philips data)
+rf_predictions <- predict(final_rf_fit, new_data = test_data)
+
+# Bind predictions with the actual values for evaluation
+results <- bind_cols(test_data, rf_predictions)
+
+# Confusion matrix for general evaluation
+conf_matrix <- confusionMatrix(results$.pred_class, results$case_control)
+print(conf_matrix)
+
+# Calculate F1 Score using yardstick
+f1_score <- f_meas(results, truth = case_control, estimate = .pred_class, positive = "case")
+print(f1_score)
+
+
+
+
+
+
+# Check and align the factor levels for 'truth' and 'estimate'
+#predictions$case_control <- factor(predictions$case_control, levels = c("0", "1"))
+#predictions$.pred_class <- factor(predictions$.pred_class, levels = c("0", "1"))
+
+# Now, try calculating the accuracy again
+#accuracy <- accuracy(predictions, truth = case_control, estimate = .pred_class)
+#print(accuracy)
+
+# Make predictions on the mixed GE and Philips datasets
+predictions <- final_rf_fit %>%
+  predict(test_data) %>%
+  bind_cols(test_data)
+
+# Evaluate the model performance (confusion matrix)
+conf_matrix <- predictions %>%
+  conf_mat(truth = case_control, estimate = .pred_class)
+
+# Print confusion matrix
+print(conf_matrix)
+
+# Variable Importance Plot
+vip(final_rf_fit$fit$fit$fit)
+
+sum(predictions$.pred_class == predictions$case_control) / length(predictions$.pred_class == predictions$case_control)
+
+final_rf_fit$fit
+predicted_values <- predictions$.pred_class
+
+# Accuracy
+accuracy <- accuracy(predictions, truth = case_control, estimate = .pred_class)
+print(accuracy)
+
+
+# Get predicted probabilities for "Case" (class 1)
+predictions_prob <- final_rf_fit %>%
+  predict(test_data, type = "prob") %>%
+  bind_cols(test_data)
+
+# View the predictions data
+head(predictions_prob)
+
+# ROC curve and AUC calculation using the predicted probability for "Case"
+roc_curve_data <- roc_curve(predictions_prob, truth = case_control, .pred_1)
+auc_value <- roc_auc(predictions_prob, truth = case_control, .pred_1)
+
+# Print ROC curve and AUC value
+ggplot(roc_curve_data, aes(x = 1 - specificity, y = sensitivity)) +
+  geom_line() +
+  geom_abline(linetype = "dashed") +
+  labs(title = "ROC Curve", x = "1 - Specificity", y = "Sensitivity")
+
+# Print AUC value
+print(paste("AUC: ", auc_value$.estimate))
+
+
+# Directly access the confusion matrix components
+cm_table <- conf_matrix$table
+
+# Extract the values (True Positives, False Positives, True Negatives, False Negatives)
+TP <- cm_table[2, 2]  # True Positives
+FP <- cm_table[1, 2]  # False Positives
+TN <- cm_table[1, 1]  # True Negatives
+FN <- cm_table[2, 1]  # False Negatives
+
+# Calculate Sensitivity and Specificity
+sensitivity <- TP / (TP + FN)
+specificity <- TN / (TN + FP)
+
+# Print Sensitivity and Specificity
+print(paste("Sensitivity: ", sensitivity))
+print(paste("Specificity: ", specificity))
+
+# Get predicted probabilities for "Case" (class 1)
+predictions_prob <- final_rf_fit %>%
+  predict(test_data, type = "prob") %>%
+  bind_cols(test_data)
+
+# View the first few rows of predicted probabilities
+head(predictions_prob)
+
+# Calculate the ROC curve
+roc_curve_data <- roc_curve(predictions_prob, truth = case_control, .pred_1)
+
+# Calculate AUC value
+auc_value <- roc_auc(predictions_prob, truth = case_control, .pred_1)
+
+# Print the ROC curve
+ggplot(roc_curve_data, aes(x = 1 - specificity, y = sensitivity)) +
+  geom_line() +
+  geom_abline(linetype = "dashed") +
+  labs(title = "ROC Curve", x = "1 - Specificity", y = "Sensitivity")
+
+# Print the AUC value
+print(paste("AUC: ", auc_value$.estimate))
+
+
+
+
+# Set number of permutations
+n_permutations <- 1000
+
+# Function to calculate AUC for a shuffled dataset
+calculate_auc <- function(data) {
+  pred_prob <- final_rf_fit %>%
+    predict(data, type = "prob") %>%
+    bind_cols(data)
+  
+  auc_val <- roc_auc(pred_prob, truth = case_control, .pred_1)
+  return(auc_val$.estimate)
+}
+
+# Calculate the observed AUC
+observed_auc <- auc_value$.estimate
+
+# Perform permutation test to generate a distribution of AUC values
+set.seed(123)
+shuffled_aucs <- replicate(n_permutations, {
+  shuffled_data <- test_data %>%
+    mutate(case_control = sample(case_control))
+  
+  calculate_auc(shuffled_data)
+})
+
+# Calculate p-value: proportion of shuffled AUCs greater than or equal to observed AUC
+p_value <- mean(shuffled_aucs >= observed_auc)
+
+# Print the observed AUC and p-value
+print(paste("Observed AUC: ", observed_auc))
+print(paste("p-value from permutation test: ", p_value))
+
+# Create a null model that always predicts the majority class
+null_predictions <- predictions %>%
+  mutate(.pred_class = as.factor(ifelse(case_control == 1, 1, 2)))  # Assuming 1 is the majority class
+
+# Null model's accuracy
+null_accuracy <- mean(null_predictions$.pred_class == null_predictions$case_control)
+
+# Null model's ROC curve and AUC
+null_roc_curve <- roc_curve(null_predictions, truth = case_control, .pred_class)
+null_auc <- roc_auc(null_predictions, truth = case_control, .pred_class)
+
+
+```
